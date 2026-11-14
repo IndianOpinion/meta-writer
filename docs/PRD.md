@@ -774,7 +774,7 @@ layer for WordPress and a mock transport for the model library.
 | T25 | 29 | Duplicate description is flagged, not rejected. |
 | T26 | 30, 31 | Write records provenance; a one-character edit after makes the field manual. |
 | T27 | 32 | No code path (accept, bulk accept, regenerate, refresh-own, revert, migrate, uninstall) changes a manual value. |
-| T28 | 33 | Own value is not regenerated without `--refresh-own`; with it, a pending suggestion is made, not a write. |
+| T28 | 33 | Own value is not regenerated unless `--refresh-own` is given; then a pending suggestion is made, not a write. |
 | T29 | 34 | A field holding only a template variable is manual. |
 | T30 | 35, 36 | Suggestion stores all listed properties; inline edit is validated and a failing edit is refused with a reason. |
 | T31 | 37, 67 | Target filled between generation and accept: not written, `superseded`. |
