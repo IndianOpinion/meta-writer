@@ -11,6 +11,7 @@ use IndianOpinion\LlmJson\Request;
 use IndianOpinion\LlmJson\Schema;
 use IndianOpinion\MetaWriter\Exception\CallFailedException;
 use IndianOpinion\MetaWriter\Exception\CreditExhaustedException;
+use IndianOpinion\MetaWriter\Prompt;
 
 /**
  * Calls through indianopinion/llm-json-php. The library owns retries,
@@ -32,7 +33,7 @@ final class LlmJsonCaller implements ModelCaller
         try {
             $request = Request::for(self::PURPOSE, Schema::fromArray('title_description', $schema))
                 ->withMessages($messages)
-                ->withTokenCap(600)
+                ->withTokenCap(Prompt::MAX_OUTPUT_TOKENS)
                 ->withKeepRaw($this->keepRaw);
             $result = $this->client->complete($request);
         } catch (LibraryCreditExhausted $e) {
@@ -48,7 +49,9 @@ final class LlmJsonCaller implements ModelCaller
         /** @var array<string, mixed> $data */
         $data = $result->data();
 
-        return new CallResponse($data, $result->provider() . '/' . $result->model(), $result->raw(), $result->totalUsage()->cost);
+        $usage = $result->totalUsage();
+
+        return new CallResponse($data, $result->provider() . '/' . $result->model(), $result->raw(), $usage->cost, $usage->promptTokens, $usage->completionTokens);
     }
 
     public function routeLabel(): string

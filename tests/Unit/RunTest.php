@@ -139,34 +139,57 @@ final class RunTest extends TestCase
     {
         $this->post(1);
         $jobs = [];
-        add_filter('gen_queue_enqueue_job', static function ($none, array $job) use (&$jobs) {
-            $jobs[] = $job;
+        add_filter('gen_queue_enqueue_job', static function ($none, string $type, array $payload, array $args) use (&$jobs) {
+            $jobs[] = ['type' => $type, 'payload' => $payload, 'args' => $args];
 
-            return 'job-' . count($jobs);
-        }, 10, 2);
+            return count($jobs);
+        }, 10, 4);
         $o = $this->c->generator->generate(1, ['dry_run' => false]);
         $this->assertSame(Outcome::QUEUED, $o->kind);
         $this->assertCount(0, $this->caller->calls);
         $this->assertSame(GenQueue::JOB_TYPE, $jobs[0]['type']);
+        $this->assertSame(1, $jobs[0]['payload']['post_id']);
         $hash = \IndianOpinion\MetaWriter\Input::fromPost(get_post(1), $this->c->settings)->hash();
-        $this->assertSame('meta-writer:1:' . $hash, $jobs[0]['idempotency_key']);
+        $this->assertSame('meta-writer:1:' . $hash, $jobs[0]['args']['idempotency_key']);
 
-        // The handler rechecks the kill switch and the cap.
+        // The type is registered with gen-queue when it asks.
+        do_action('gen_queue_register_types');
+        GenQueue::registerType([Plugin::class, 'handleQueuedJob']);
+        $this->assertSame(GenQueue::JOB_TYPE, \CompanionState::$queueTypes[0][0]);
+
+        // gen-queue hands back its Job object; the handler rechecks the
+        // kill switch and the cap, and a stop asks the queue to retry later.
+        $job = (object) ['payload' => $jobs[0]['payload']];
         $this->c->kill->set(true, 't');
-        Plugin::handleQueuedJob($jobs[0]['payload']);
+        try {
+            Plugin::handleQueuedJob($job, null);
+            $this->fail('a stop must be retryable');
+        } catch (\IndianOpinion\GenQueue\RetryableException $e) {
+            $this->assertStringContainsString(Reason::DISABLED, $e->getMessage());
+        }
         $this->assertCount(0, $this->caller->calls);
         $this->c->kill->set(false, 't');
         $this->settings(['daily_cap' => 0]);
-        Plugin::handleQueuedJob($jobs[0]['payload']);
+        try {
+            Plugin::handleQueuedJob($job, null);
+            $this->fail('a capped job must be retryable');
+        } catch (\IndianOpinion\GenQueue\RetryableException $e) {
+            $this->assertGreaterThanOrEqual(60, $e->retryAfter);
+        }
         $this->assertCount(0, $this->caller->calls);
         $this->settings(['daily_cap' => 5]);
-        Plugin::handleQueuedJob($jobs[0]['payload']);
+        $result = Plugin::handleQueuedJob($job, null);
+        $this->assertSame(Outcome::GENERATED, $result['outcome']);
         $this->assertCount(1, $this->caller->calls);
         $this->assertSame(Status::PENDING, $this->store->latestForPost(1)?->status);
 
-        // Without gen-queue (filter answers null) the plugin runs directly.
+        // A WP_Error from the queue, or no queue at all, means run directly.
         remove_all_filters('gen_queue_enqueue_job');
-        add_filter('gen_queue_enqueue_job', static fn () => null, 10, 2);
+        add_filter('gen_queue_enqueue_job', static fn () => new \WP_Error('gen_queue_enqueue_failed', 'x'), 10, 4);
+        $this->post(3);
+        $this->assertSame(Outcome::GENERATED, $this->c->generator->generate(3, ['dry_run' => false])->kind);
+        remove_all_filters('gen_queue_enqueue_job');
+        add_filter('gen_queue_enqueue_job', static fn () => null, 10, 4);
         $this->post(2);
         $this->assertSame(Outcome::GENERATED, $this->c->generator->generate(2, ['dry_run' => false])->kind);
     }

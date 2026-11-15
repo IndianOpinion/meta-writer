@@ -25,6 +25,7 @@ abstract class TestCase extends \PHPUnit\Framework\TestCase
     {
         \WpState::reset();
         \WP_CLI::reset();
+        \CompanionState::reset();
         \WpState::$caps = [
             self::ADMIN => ['manage_options', 'edit_others_posts', 'edit_posts'],
             self::EDITOR => ['edit_others_posts', 'edit_posts'],

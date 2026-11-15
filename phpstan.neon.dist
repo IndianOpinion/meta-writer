@@ -9,6 +9,7 @@ parameters:
         - vendor/php-stubs/wordpress-stubs/wordpress-stubs.php
         - vendor/php-stubs/wp-cli-stubs/wp-cli-stubs.php
         - tests/phpstan-constants.php
+        - tests/stubs/companions.php
     treatPhpDocTypesAsCertain: false
     ignoreErrors:
         # Table names come from $wpdb->prefix; every value goes through a placeholder.

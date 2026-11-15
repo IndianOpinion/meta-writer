@@ -145,7 +145,7 @@ PHP functions: `meta_writer_generate()`, `meta_writer_get_suggestion()`, `meta_w
 
 REST, under `meta-writer/v1`, authenticated only: `GET /suggestions`, `GET /suggestions/<id>`, `POST /suggestions/<id>/accept`, `POST /suggestions/<id>/reject`, `POST /posts/<id>/generate` (one post), `POST /posts/<id>/revert`. There is no bulk generation over REST.
 
-Optional companions, used only when active: a generation queue (`gen_queue_enqueue_job`), a spend meter (`spend_meter_pre_spend`, `spend_meter_record`, `spend_meter_release`) and a prompt library (`prompt_library_register`, `prompt_library_render`). meta-writer's own cap and kill switch apply even when they are present. The exact protocol is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+Optional companions, used only when active: a generation queue ([gen-queue](https://github.com/IndianOpinion/gen-queue): `gen_queue_enqueue_job`, `gen_queue_register_types`), a spend meter ([spend-meter](https://github.com/IndianOpinion/spend-meter) contract 1: `spend_meter_pre_spend` with purpose `meta-writer.generate`, then one `spend_meter_record` per call or a `spend_meter_release`) and a prompt library ([prompt-library](https://github.com/IndianOpinion/prompt-library): template `meta-writer-title-description`, rendered through `promptlib_render` with the built-in prompt as its fallback). meta-writer's own cap and kill switch apply even when they are present. The exact protocol is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Settings in code (must-use loader stub)
 

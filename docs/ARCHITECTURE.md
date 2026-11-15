@@ -123,33 +123,62 @@ so nothing escapes a cron event (case 75).
     spend meter allowed the call, the reservation is released. Reason: the
     PRD orders cap before spend meter, but taking the cap slot first would
     count a call the spend meter then refuses.
-11. **Spend meter protocol.** `apply_filters('spend_meter_pre_spend', null,
-    ['purpose' => 'meta-writer.generate', 'units' => 1, 'context' =>
-    ['post_id' => N]])` must return an array with `allowed === true`, a
-    `reason` from an allow list (`''`, `ok`, `allowed`, `within_budget`,
-    `unmetered`, filterable with `meta_writer_spend_allow_reasons`) and a
-    `reservation`. Anything else is a deny, including an unknown reason. A
-    successful call fires `spend_meter_record` with the reservation and the
-    cost the library reports; a failed call fires `spend_meter_release`.
-    Exactly one of the two per reservation. The hook names beyond
-    `spend_meter_pre_spend` follow the PRD's reservation wording; if the
-    spend meter settles on other names, only `Integration\SpendMeter`
-    changes.
-12. **Queue protocol.** `apply_filters('gen_queue_enqueue_job', null, ['type'
-    => 'meta_writer_generate', 'payload' => [...], 'idempotency_key' =>
-    'meta-writer:<post>:<input hash>'])`. Null, false or a WP_Error means no
-    queue: the post runs directly. Jobs come back on the action
-    `gen_queue_handle_meta_writer_generate` with the payload; the handler
-    runs the same generator, which re-checks the kill switch and the cap
-    (case 52). Enqueueing checks the kill switch and cap headroom but takes
-    no cap slot; the handler takes it.
-13. **Prompt library protocol.** On `init` meta-writer fires
-    `prompt_library_register` with the consumer id
-    `meta-writer/title-description`, its messages, variables and schema.
-    Rendering uses `apply_filters('prompt_library_render', null, consumer,
-    vars)`, which may return a message list or `['messages' => ...,
-    'version' => ...]`. An exception or an unusable answer logs a warning
-    and falls back to the built-in prompt (case 58).
+11. **Spend meter protocol (spend-meter contract 1).** Detection is
+    `defined('SPEND_METER_API')`. A lower version means no meter; a higher
+    one is a contract this release does not know, so every call is denied
+    (fail closed). Before each call meta-writer applies
+    `apply_filters('spend_meter_pre_spend', null, $intent)` with `purpose`
+    `meta-writer.generate`, `caller` `meta-writer`, `provider` and `model`
+    from the route label (`provider/model`; a site caller is `custom`),
+    `est_input_tokens` (prompt bytes divided by three, a generous
+    estimate), `max_output_tokens` (600, the call's token cap) and `meta`
+    with the post ID. `null` means no meter answered: the call goes ahead
+    under meta-writer's own cap and kill switch. Only `allowed === true`
+    with reason `ok` (filterable with `meta_writer_spend_allow_reasons`) is
+    an allow. A deny, an unknown reason, a decision whose `api` is not 1, a
+    malformed answer and a thrown error all stop the run with
+    `spend_denied` and the reason in the log; an allow that is refused this
+    way releases its `reservation_id`. After an allow, exactly one of:
+    `do_action('spend_meter_record', $call)` for every attempt that reached
+    the caller (status `ok` with tokens and the provider's cost in nanos,
+    `error_billed` for a failed call, `error_unbilled` with HTTP 402 when
+    every provider is out of credit), or `do_action('spend_meter_release',
+    $reservation_id)` when meta-writer took the reservation and then did
+    not call (the atomic cap take failed). A failed call is recorded, never
+    released, because the provider may have billed it.
+12. **Queue protocol (gen-queue contract).** Enqueue is
+    `apply_filters('gen_queue_enqueue_job', null, 'meta_writer_generate',
+    $payload, ['idempotency_key' => 'meta-writer:<post>:<input hash>',
+    'source' => 'meta-writer'])`. Only a positive integer job id means the
+    queue took the job; `null` (no queue) or a `WP_Error` means the post
+    runs directly. The type is registered on `gen_queue_register_types`
+    with `gen_queue_register_type()`, three attempts, and `meter.purpose`
+    `meta-writer.generate` so gen-queue's own pre-spend check asks about
+    the same purpose. The handler receives gen-queue's `Job` and
+    `JobContext`, runs the same generator, which re-checks the kill switch
+    and the cap (case 52), and reports any provider cost with
+    `$ctx->addCost()` (`metered` true when spend-meter already recorded
+    it). A stop that clears with time (cap, kill switch, spend deny,
+    target) throws gen-queue's `RetryableException` (after the cap: retry
+    after the next site midnight), credit exhaustion throws its
+    `AccountException`; a generated, skipped or failed post completes the
+    job, so the queue never repeats a call that may have been billed.
+    Enqueueing checks the kill switch and cap headroom but takes no cap
+    slot; the handler takes it.
+13. **Prompt library protocol (prompt-library contract 1.0).** On `init`,
+    when prompt-library is active, meta-writer calls
+    `promptlib_register_consumer('meta-writer-title-description',
+    'meta-writer/title-description', <the eight variables>)` and
+    `promptlib_register_default()` with the built-in prompt as a
+    `prompt-library/1` definition (typed variables, JSON output schema,
+    token cap 600), so the template is installed as version 1 and the
+    editor can change it. Rendering is `apply_filters('promptlib_render',
+    null, slug, vars, 'live', ['consumer' => ..., 'fallback' =>
+    <definition>])`. An array with `system` and `user` becomes the
+    messages, with prompt version `library-<n>` (a render from the
+    fallback counts as the built-in version). `null` means the library is
+    absent; a `WP_Error`, an exception or an array without a usable `user`
+    part logs a warning and falls back to the built-in prompt (case 58).
 14. **Model calls without the library.** Ruling of 14 November: group C
     repos may depend on `indianopinion/llm-json-php` and must also offer a
     filter for a site's own caller. `meta_writer_caller` may return a

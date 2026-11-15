@@ -11,7 +11,11 @@ namespace IndianOpinion\MetaWriter;
 final class Prompt
 {
     public const CONSUMER = 'meta-writer/title-description';
+    /** The prompt-library template slug. */
+    public const SLUG = 'meta-writer-title-description';
     public const BUILTIN_VERSION = 'builtin-1';
+    /** Output token cap per call; also the spend meter's max_output_tokens. */
+    public const MAX_OUTPUT_TOKENS = 600;
     public const VARIABLES = ['title', 'excerpt', 'body', 'language', 'title_min', 'title_max', 'description_min', 'description_max'];
 
     public function __construct(private readonly Log $log)
@@ -49,19 +53,52 @@ final class Prompt
         return "Language: {{language}}\n\nPage title: {{title}}\n\nExcerpt: {{excerpt}}\n\nPage text:\n{{body}}";
     }
 
-    /** Tell prompt-library about our default prompt, when it listens. */
+    /**
+     * Tell prompt-library which variables meta-writer supplies and ship the
+     * built-in prompt as its default template. Runs on init, only when
+     * prompt-library is active.
+     */
     public static function register(): void
     {
-        do_action('prompt_library_register', self::CONSUMER, [
-            'label' => 'meta-writer: SEO title and meta description',
-            'version' => self::BUILTIN_VERSION,
-            'variables' => self::VARIABLES,
-            'messages' => [
-                ['role' => 'system', 'content' => self::systemText()],
-                ['role' => 'user', 'content' => self::userText()],
+        if (function_exists('promptlib_register_consumer')) {
+            promptlib_register_consumer(self::SLUG, self::CONSUMER, self::VARIABLES);
+        }
+        if (function_exists('promptlib_register_default')) {
+            promptlib_register_default(self::CONSUMER, self::definition());
+        }
+    }
+
+    /**
+     * The built-in prompt in prompt-library's definition format
+     * (prompt-library/1). Also passed as the render fallback.
+     *
+     * @return array<string, mixed>
+     */
+    public static function definition(): array
+    {
+        $int = static fn (string $name, string $description): array => ['name' => $name, 'type' => 'integer', 'description' => $description];
+
+        return [
+            'format' => 'prompt-library/1',
+            'slug' => self::SLUG,
+            'title' => 'meta-writer: SEO title and meta description',
+            'description' => 'Drafts one SEO title and one meta description for a post. The answer must be a JSON object with "title" and "description".',
+            'system' => self::systemText(),
+            'user' => self::userText(),
+            'variables' => [
+                ['name' => 'title', 'type' => 'string', 'escape' => 'line', 'description' => 'The post title.'],
+                ['name' => 'excerpt', 'type' => 'text', 'required' => false, 'description' => 'The manual excerpt, often empty.'],
+                ['name' => 'body', 'type' => 'text', 'description' => 'The cleaned post text, cut to the body budget.'],
+                ['name' => 'language', 'type' => 'string', 'escape' => 'line', 'description' => 'BCP 47 language tag for the answer.'],
+                $int('title_min', 'Minimum title length in characters.'),
+                $int('title_max', 'Maximum title length in characters.'),
+                $int('description_min', 'Minimum description length in characters.'),
+                $int('description_max', 'Maximum description length in characters.'),
             ],
-            'schema' => self::schema(),
-        ]);
+            'output' => ['mode' => 'json', 'schema' => self::schema()],
+            'settings' => ['temperature' => null, 'token_cap' => self::MAX_OUTPUT_TOKENS],
+            'note' => 'Installed by meta-writer ' . self::BUILTIN_VERSION,
+        ];
     }
 
     /**
@@ -106,33 +143,48 @@ final class Prompt
     }
 
     /**
-     * Render through prompt-library when it is active. A failure logs a
-     * warning and returns null so the built-in prompt is used.
+     * Render through prompt-library when it is active, with the built-in
+     * definition as its fallback. A WP_Error, an exception or an unusable
+     * answer logs a warning and returns null so the built-in prompt is
+     * used (case 58).
      *
      * @param array<string, string|int> $vars
      * @return array{0: list<array{role: string, content: string}>, 1: string}|null
      */
     private function fromLibrary(array $vars): ?array
     {
-        if (!has_filter('prompt_library_render')) {
+        if (!has_filter('promptlib_render')) {
             return null;
         }
         try {
-            $out = apply_filters('prompt_library_render', null, self::CONSUMER, $vars);
+            $out = apply_filters('promptlib_render', null, self::SLUG, $vars, 'live', ['consumer' => self::CONSUMER, 'fallback' => self::definition()]);
         } catch (\Throwable $e) {
             $this->log->warning('prompt-library render failed; using the built-in prompt.', ['event' => 'prompt_fallback', 'error' => (new \ReflectionClass($e))->getShortName()]);
 
             return null;
         }
-        $messages = is_array($out) && isset($out['messages']) ? $out['messages'] : $out;
-        if (!self::validMessages($messages)) {
+        if ($out === null) {
+            return null;
+        }
+        if (is_wp_error($out)) {
+            $this->log->warning('prompt-library render failed; using the built-in prompt.', ['event' => 'prompt_fallback', 'error' => (string) $out->get_error_code()]);
+
+            return null;
+        }
+        if (!is_array($out) || !is_string($out['user'] ?? null) || trim($out['user']) === '' || !is_string($out['system'] ?? '')) {
             $this->log->warning('prompt-library gave no usable prompt; using the built-in prompt.', ['event' => 'prompt_fallback']);
 
             return null;
         }
-        $version = is_array($out) && isset($out['version']) && is_scalar($out['version']) ? 'library-' . $out['version'] : 'library';
+        $messages = [];
+        $system = (string) ($out['system'] ?? '');
+        if (trim($system) !== '') {
+            $messages[] = ['role' => 'system', 'content' => $system];
+        }
+        $messages[] = ['role' => 'user', 'content' => $out['user']];
+        $number = isset($out['version']) && is_int($out['version']) ? $out['version'] : 0;
+        $version = $number > 0 ? 'library-' . $number : self::BUILTIN_VERSION;
 
-        /** @var list<array{role: string, content: string}> $messages */
         return [$messages, $version];
     }
 

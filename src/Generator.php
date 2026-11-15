@@ -206,40 +206,48 @@ final class Generator
         $response = null;
         $route = '';
         $version = Prompt::BUILTIN_VERSION;
+        $cost = null;
+        $metered = false;
         $caller = $this->caller();
         assert($caller !== null);
 
         foreach ([0, 1] as $attempt) {
-            $stop = $this->gate($post->ID, $wanted, $calls);
-            if ($stop instanceof Outcome) {
-                return $stop;
-            }
-            $reservation = $this->spend->active() ? $this->lastReservation : null;
             [$messages, $version] = $this->prompt->build($vars, $post, $retryNote);
+            $route = $caller->routeLabel();
+            $decision = null;
+            $stop = $this->gate($post->ID, $route, $messages, $decision);
+            if ($stop !== null) {
+                return new Outcome(Outcome::STOPPED, $post->ID, $stop[0], $wanted, $input->length(), $calls, null, $stop[1], $cost, $metered);
+            }
             $calls++;
+            $metered = $metered || $decision !== null;
             try {
                 $response = $caller->call($messages, Prompt::schema());
-                if ($reservation !== null) {
-                    $this->spend->record($reservation, $response->cost);
+            } catch (\Throwable $e) {
+                // Every attempt that reached the caller is recorded, billed or not.
+                $credit = $e instanceof CreditExhaustedException;
+                if ($decision !== null) {
+                    $this->spend->record($decision['reservation_id'], $route, $credit ? 'error_unbilled' : 'error_billed', $attempt + 1, null, null, null, $credit ? 402 : null, $post->ID);
                 }
-            } catch (CreditExhaustedException $e) {
-                if ($reservation !== null) {
-                    $this->spend->release($reservation);
-                }
-                $this->storeFailure($post->ID, $wanted, $input, 'CreditExhaustedException', $e->getMessage(), $caller->routeLabel(), $version, $userId, null);
-                $this->log->error('Every provider is out of credit; run stopped.', ['event' => 'credit_exhausted', 'post_id' => $post->ID]);
+                if ($credit) {
+                    $this->storeFailure($post->ID, $wanted, $input, 'CreditExhaustedException', $e->getMessage(), $route, $version, $userId, null);
+                    $this->log->error('Every provider is out of credit; run stopped.', ['event' => 'credit_exhausted', 'post_id' => $post->ID]);
 
-                return new Outcome(Outcome::STOPPED, $post->ID, Reason::CREDIT_EXHAUSTED, $wanted, $input->length(), $calls);
-            } catch (CallFailedException $e) {
-                if ($reservation !== null) {
-                    $this->spend->release($reservation);
+                    return new Outcome(Outcome::STOPPED, $post->ID, Reason::CREDIT_EXHAUSTED, $wanted, $input->length(), $calls, null, '', $cost, $metered);
                 }
-                $s = $this->storeFailure($post->ID, $wanted, $input, $e->errorClass(), $e->getMessage(), $caller->routeLabel(), $version, $userId, null);
-                $this->log->error('Model call failed.', ['event' => 'call_failed', 'post_id' => $post->ID, 'error_class' => $e->errorClass(), 'message' => $e->getMessage()]);
+                $class = $e instanceof CallFailedException ? $e->errorClass() : (new \ReflectionClass($e))->getShortName();
+                $s = $this->storeFailure($post->ID, $wanted, $input, $class, $e->getMessage(), $route, $version, $userId, null);
+                $this->log->error('Model call failed.', ['event' => 'call_failed', 'post_id' => $post->ID, 'error_class' => $class, 'message' => $e->getMessage()]);
 
-                return new Outcome(Outcome::FAILED, $post->ID, $e->errorClass(), $wanted, $input->length(), $calls, $s);
+                return new Outcome(Outcome::FAILED, $post->ID, $class, $wanted, $input->length(), $calls, $s, '', $cost, $metered);
             }
-            $route = $response->route !== '' ? $response->route : $caller->routeLabel();
+            $route = $response->route !== '' ? $response->route : $route;
+            if ($decision !== null) {
+                $this->spend->record($decision['reservation_id'], $route, 'ok', $attempt + 1, $response->inputTokens, $response->outputTokens, $response->cost, 200, $post->ID);
+            }
+            if ($response->cost !== null) {
+                $cost = ($cost ?? 0.0) + $response->cost;
+            }
 
             [$fits, $failure] = $this->validateOutput($response->data, $wanted, $post, $input);
             if ($failure === null) {
@@ -257,7 +265,7 @@ final class Generator
             $s = $this->storeFailure($post->ID, $wanted, $input, 'invalid_output', $failure[0] . ': ' . $failure[1], $route, $version, $userId, $raw);
             $this->log->warning('Model output failed validation twice.', ['event' => 'invalid_output', 'post_id' => $post->ID, 'field' => $failure[0], 'reason' => $failure[1]]);
 
-            return new Outcome(Outcome::FAILED, $post->ID, 'invalid_output', $wanted, $input->length(), $calls, $s);
+            return new Outcome(Outcome::FAILED, $post->ID, 'invalid_output', $wanted, $input->length(), $calls, $s, '', $cost, $metered);
         }
 
         $flags = [];
@@ -301,7 +309,7 @@ final class Generator
             // Case 75: the call is already counted; log and carry on.
             $this->log->error('Could not store a suggestion.', ['event' => 'store_failed', 'post_id' => $post->ID, 'message' => $e->getMessage()]);
 
-            return new Outcome(Outcome::FAILED, $post->ID, 'store_failed', $wanted, $input->length(), $calls);
+            return new Outcome(Outcome::FAILED, $post->ID, 'store_failed', $wanted, $input->length(), $calls, null, '', $cost, $metered);
         }
         if ($pending !== null) {
             $this->store->transition($pending->id, [Status::PENDING], Status::SUPERSEDED, ['error_message' => 'replaced by #' . $id]);
@@ -311,49 +319,63 @@ final class Generator
             do_action('meta_writer_suggestion_created', $suggestion);
         }
 
-        return new Outcome(Outcome::GENERATED, $post->ID, '', $wanted, $input->length(), $calls, $suggestion);
+        return new Outcome(Outcome::GENERATED, $post->ID, '', $wanted, $input->length(), $calls, $suggestion, '', $cost, $metered);
     }
-
-    private ?string $lastReservation = null;
 
     /**
      * Kill switch, cap headroom, spend meter, then the atomic cap take.
+     * Returns the stop reason and message, or null when the call may go
+     * ahead; $decision then holds the spend meter's allow (null when no
+     * meter answered), which the caller must close with one record.
      *
-     * @param list<string> $wanted
+     * @param list<array{role: string, content: string}>                                        $messages
+     * @param array{allowed: bool, reason: string, reservation_id: string|null}|null $decision
+     * @param-out array{allowed: bool, reason: string, reservation_id: string|null}|null $decision
+     * @return array{0: string, 1: string}|null
      */
-    private function gate(int $postId, array $wanted, int $calls): ?Outcome
+    private function gate(int $postId, string $route, array $messages, ?array &$decision): ?array
     {
-        $this->lastReservation = null;
+        $decision = null;
         if ($this->kill->isOn()) {
-            return new Outcome(Outcome::STOPPED, $postId, Reason::DISABLED, $wanted, calls: $calls);
+            return [Reason::DISABLED, ''];
         }
         if ($this->cap->remaining() <= 0) {
             do_action('meta_writer_cap_reached', $this->cap->cap(), $this->cap->day());
 
-            return new Outcome(Outcome::STOPPED, $postId, Reason::CAPPED, $wanted, calls: $calls);
+            return [Reason::CAPPED, ''];
         }
-        if ($this->spend->active()) {
-            $answer = $this->spend->preSpend($postId);
-            if (!$answer['allowed']) {
-                if ($answer['reservation'] !== '') {
-                    $this->spend->release($answer['reservation']);
-                }
-                $this->log->warning('Spend meter denied the call.', ['event' => 'spend_denied', 'post_id' => $postId, 'reason' => $answer['reason']]);
+        $answer = $this->spend->preSpend($postId, $route, self::estimateTokens($messages), Prompt::MAX_OUTPUT_TOKENS);
+        if ($answer !== null && !$answer['allowed']) {
+            $this->log->warning('Spend meter denied the call.', ['event' => 'spend_denied', 'post_id' => $postId, 'reason' => $answer['reason']]);
 
-                return new Outcome(Outcome::STOPPED, $postId, Reason::SPEND_DENIED, $wanted, calls: $calls, message: $answer['reason']);
-            }
-            $this->lastReservation = $answer['reservation'];
+            return [Reason::SPEND_DENIED, $answer['reason']];
         }
         if (!$this->cap->take()) {
-            if ($this->lastReservation !== null) {
-                $this->spend->release($this->lastReservation);
-                $this->lastReservation = null;
+            if ($answer !== null && $answer['reservation_id'] !== null) {
+                $this->spend->release($answer['reservation_id']);
             }
 
-            return new Outcome(Outcome::STOPPED, $postId, Reason::CAPPED, $wanted, calls: $calls);
+            return [Reason::CAPPED, ''];
         }
+        $decision = $answer;
 
         return null;
+    }
+
+    /**
+     * A generous input token estimate for the spend meter: one token per
+     * three bytes of prompt text.
+     *
+     * @param list<array{role: string, content: string}> $messages
+     */
+    public static function estimateTokens(array $messages): int
+    {
+        $bytes = 0;
+        foreach ($messages as $m) {
+            $bytes += strlen($m['content']);
+        }
+
+        return (int) ceil($bytes / 3);
     }
 
     /**

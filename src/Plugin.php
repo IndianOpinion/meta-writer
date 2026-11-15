@@ -46,7 +46,9 @@ final class Plugin
         add_action('deleted_post', static function (int $postId) use ($c): void {
             $c->suggestions->deleteForPost($postId);
         });
-        add_action(GenQueue::HANDLER_ACTION, [self::class, 'handleQueuedJob']);
+        add_action('gen_queue_register_types', static function (): void {
+            GenQueue::registerType([self::class, 'handleQueuedJob']);
+        });
         add_action('admin_init', [self::class, 'privacyText']);
         add_action('switch_blog', static function (): void {
             Container::set(null);
@@ -128,19 +130,31 @@ final class Plugin
         }
     }
 
-    /** @param mixed $payload */
-    public static function handleQueuedJob($payload): void
+    /**
+     * The gen-queue handler (case 56). gen-queue passes its Job (whose
+     * payload is the array meta-writer enqueued) and a JobContext. The
+     * generator re-checks the kill switch and the cap (case 52).
+     *
+     * A stop that clears with time (cap, kill switch, spend deny, target)
+     * is handed back to gen-queue as a retryable error, credit exhaustion as
+     * an account error, so the job waits instead of failing. A finished
+     * post, skipped, generated or failed, completes the job: a failed call
+     * is never retried by the queue, because it may have been billed.
+     *
+     * @return array<string, int|string>
+     */
+    public static function handleQueuedJob(mixed $job, mixed $ctx = null): array
     {
         $c = Container::get();
+        $payload = is_object($job) && isset($job->payload) && is_array($job->payload) ? $job->payload : (is_array($job) ? $job : []);
+        $postId = (int) ($payload['post_id'] ?? 0);
+        if ($postId <= 0) {
+            return ['outcome' => 'invalid_payload'];
+        }
         try {
-            $payload = is_array($payload) ? $payload : [];
-            $postId = (int) ($payload['post_id'] ?? 0);
-            if ($postId <= 0) {
-                return;
-            }
-            // Case 52: the generator re-checks the kill switch and the cap.
-            $c->generator->generate($postId, [
-                'fields' => Field::parseList(isset($payload['fields']) && is_array($payload['fields']) ? array_values(array_map('strval', $payload['fields'])) : null),
+            $fields = isset($payload['fields']) && is_array($payload['fields']) ? array_values(array_map('strval', $payload['fields'])) : null;
+            $outcome = $c->generator->generate($postId, [
+                'fields' => Field::parseList($fields),
                 'regenerate' => !empty($payload['regenerate']),
                 'refresh_own' => !empty($payload['refresh_own']),
                 'user_id' => (int) ($payload['user_id'] ?? 0),
@@ -148,7 +162,44 @@ final class Plugin
                 'from_queue' => true,
             ]);
         } catch (\Throwable $e) {
-            $c->log->error('Queued job failed.', ['event' => 'queue_error', 'error' => (new \ReflectionClass($e))->getShortName()]);
+            $c->log->error('Queued job failed.', ['event' => 'queue_error', 'post_id' => $postId, 'error' => (new \ReflectionClass($e))->getShortName()]);
+
+            return ['outcome' => 'error', 'post_id' => $postId];
+        }
+
+        if ($outcome->cost !== null && $outcome->cost > 0 && is_object($ctx) && method_exists($ctx, 'addCost')) {
+            try {
+                $ctx->addCost($outcome->cost, ['metered' => $outcome->metered]);
+            } catch (\Throwable $e) {
+                $c->log->warning('Could not report cost to the queue.', ['event' => 'queue_cost', 'post_id' => $postId]);
+            }
+        }
+
+        if ($outcome->kind === Outcome::STOPPED) {
+            $message = 'meta-writer stopped: ' . $outcome->reason;
+            if ($outcome->reason === Reason::CREDIT_EXHAUSTED && class_exists('IndianOpinion\\GenQueue\\AccountException')) {
+                throw new \IndianOpinion\GenQueue\AccountException($message);
+            }
+            if (class_exists('IndianOpinion\\GenQueue\\RetryableException')) {
+                $after = $outcome->reason === Reason::CAPPED ? self::secondsToSiteMidnight($c) : 900;
+                throw new \IndianOpinion\GenQueue\RetryableException($message, $after);
+            }
+        }
+
+        return ['outcome' => $outcome->kind, 'reason' => $outcome->reason, 'post_id' => $postId, 'suggestion' => $outcome->suggestion !== null ? $outcome->suggestion->id : 0];
+    }
+
+    /** Seconds until the cap resets, at midnight in the site's time zone. */
+    public static function secondsToSiteMidnight(Container $c): int
+    {
+        $now = (int) $c->clock->now();
+        try {
+            $tz = wp_timezone();
+            $midnight = (new \DateTimeImmutable('@' . $now))->setTimezone($tz)->modify('tomorrow');
+
+            return max(60, $midnight->getTimestamp() - $now + 60);
+        } catch (\Throwable $e) {
+            return 3600;
         }
     }
 

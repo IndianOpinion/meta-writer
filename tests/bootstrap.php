@@ -11,4 +11,5 @@ require __DIR__ . '/stubs/classes.php';
 require __DIR__ . '/stubs/functions.php';
 require __DIR__ . '/stubs/wp-cli-utils.php';
 require __DIR__ . '/stubs/wpdb.php';
+require __DIR__ . '/stubs/companions.php';
 require dirname(__DIR__) . '/vendor/autoload.php';

@@ -28,8 +28,10 @@ this project follows [Semantic Versioning](https://semver.org/).
   for thirteen scripts, duplicate and unsupported-detail flags.
 - Dry run by default for bulk runs, a daily cap counted atomically in the
   database, and a kill switch that a constant can pin on.
-- Optional integration with a generation queue, a spend meter and a prompt
-  library.
+- Optional integration with gen-queue (queued jobs with an idempotency
+  key), spend-meter contract 1 (one pre-spend check and one record or
+  release per call) and prompt-library (an editable default template with
+  the built-in prompt as its fallback).
 - `wp meta-writer` commands: generate, list, show, accept, reject, revert,
   status, kill, migrate-target and purge.
 
