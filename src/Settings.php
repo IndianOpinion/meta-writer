@@ -290,19 +290,19 @@ final class Settings
 
         if (array_key_exists('base_url', $input)) {
             $url = is_scalar($input['base_url']) ? trim((string) $input['base_url']) : '';
-            if ($url !== '' && preg_match('#^https?://[^\s]+$#', $url) !== 1) {
-                $errors['base_url'] = 'base_url must be an http or https URL.';
+            if ($url !== '' && !self::safeBaseUrl($url)) {
+                $errors['base_url'] = 'base_url must be an https URL (plain http only for localhost), because the API key travels with every request.';
             } else {
                 $out['base_url'] = $url;
             }
         }
 
         // The key: an empty submission keeps the stored key; the constant wins and is never stored.
-        if (array_key_exists('api_key', $input)) {
+        if ($this->fixedByConstant('api_key')) {
+            $out['api_key'] = '';
+        } elseif (array_key_exists('api_key', $input)) {
             $key = is_scalar($input['api_key']) ? trim((string) $input['api_key']) : '';
-            if ($this->fixedByConstant('api_key')) {
-                $out['api_key'] = '';
-            } elseif ($key !== '') {
+            if ($key !== '') {
                 if (preg_match('/^[\x21-\x7e]{8,512}$/', $key) !== 1) {
                     $errors['api_key'] = 'The API key looks malformed and was not saved.';
                 } else {
@@ -315,6 +315,23 @@ final class Settings
         }
 
         return [$out, $errors];
+    }
+
+    /** https anywhere; plain http only to the local machine. */
+    public static function safeBaseUrl(string $url): bool
+    {
+        if (preg_match('#^https?://[^\s]+$#i', $url) !== 1) {
+            return false;
+        }
+        $parts = parse_url($url);
+        if (!is_array($parts) || !isset($parts['scheme'], $parts['host'])) {
+            return false;
+        }
+        if (strtolower($parts['scheme']) === 'https') {
+            return true;
+        }
+
+        return in_array(strtolower(trim($parts['host'], '[]')), ['localhost', '127.0.0.1', '::1'], true);
     }
 
     /** @return list<string> */

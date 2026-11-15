@@ -38,13 +38,18 @@ final class MetaBox
 
     public function render(\WP_Post $post): void
     {
+        $user = get_current_user_id();
+        $flash = get_transient('meta_writer_post_msg_' . $user);
+        if (is_string($flash) && $flash !== '') {
+            delete_transient('meta_writer_post_msg_' . $user);
+            echo '<p class="notice notice-info inline">' . esc_html($flash) . '</p>';
+        }
         wp_nonce_field('meta_writer_optout_' . $post->ID, 'meta_writer_optout_nonce');
         printf(
             '<p><label><input type="checkbox" name="meta_writer_skip" value="1" %s /> %s</label></p>',
             checked(get_post_meta($post->ID, '_meta_writer_skip', true), '1', false),
             esc_html__('Never suggest for this post', 'meta-writer'),
         );
-        $user = get_current_user_id();
         $s = $this->c->suggestions->latestForPost($post->ID);
         if ($s !== null) {
             echo '<p><strong>' . esc_html(sprintf(__('Latest suggestion (#%1$d, %2$s)', 'meta-writer'), $s->id, $s->status)) . '</strong></p>';
@@ -94,7 +99,12 @@ final class MetaBox
         $message = '';
         try {
             if ($op === 'accept') {
-                $r = $this->c->reviewer->accept(isset($_GET['id']) ? absint(wp_unslash($_GET['id'])) : 0, [], [], $user);
+                $id = isset($_GET['id']) ? absint(wp_unslash($_GET['id'])) : 0;
+                $s = $this->c->suggestions->find($id);
+                if ($s === null || $s->postId !== $postId) {
+                    wp_die(esc_html__('That suggestion does not belong to this post.', 'meta-writer'), 400);
+                }
+                $r = $this->c->reviewer->accept($id, [], [], $user);
                 $message = 'written: ' . (implode(', ', $r->written) ?: 'nothing');
             } elseif ($op === 'generate') {
                 if (!$this->c->caps->can($user, Capabilities::GENERATE, $postId)) {

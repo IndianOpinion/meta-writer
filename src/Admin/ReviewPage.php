@@ -42,7 +42,8 @@ final class ReviewPage
         check_admin_referer('meta_writer_review');
         $user = get_current_user_id();
         $single = isset($_POST['single']) ? absint(wp_unslash($_POST['single'])) : 0;
-        $op = isset($_POST['op']) ? sanitize_key((string) wp_unslash($_POST['op'])) : '';
+        // A row's own Accept button always accepts, whatever the bulk select says.
+        $op = $single > 0 ? 'accept' : (isset($_POST['op']) ? sanitize_key((string) wp_unslash($_POST['op'])) : '');
         $ids = $single > 0 ? [$single] : (isset($_POST['ids']) && is_array($_POST['ids']) ? array_map('absint', wp_unslash($_POST['ids'])) : []);
         $edits = isset($_POST['edit']) && is_array($_POST['edit']) ? wp_unslash($_POST['edit']) : [];
         $confirm = isset($_POST['confirm_stale']) && is_array($_POST['confirm_stale']) ? array_map('absint', array_keys(wp_unslash($_POST['confirm_stale']))) : [];

@@ -76,6 +76,9 @@ final class CallerFactory
             return null;
         }
         $key = $this->settings->apiKey();
+        if ($this->settings->string('provider') === 'generic' && !Settings::safeBaseUrl($this->settings->string('base_url'))) {
+            return null;
+        }
         $provider = match ($this->settings->string('provider')) {
             'openai' => Provider::openAi($key),
             'generic' => Provider::generic('generic', $this->settings->string('base_url'), $key, $key === ''),
