@@ -1,0 +1,23 @@
+parameters:
+    level: 8
+    paths:
+        - src
+        - meta-writer.php
+        - bootstrap.php
+        - uninstall.php
+    bootstrapFiles:
+        - vendor/php-stubs/wordpress-stubs/wordpress-stubs.php
+        - vendor/php-stubs/wp-cli-stubs/wp-cli-stubs.php
+        - tests/phpstan-constants.php
+    treatPhpDocTypesAsCertain: false
+    ignoreErrors:
+        # Table names come from $wpdb->prefix; every value goes through a placeholder.
+        -
+            message: '#expects literal-string, .* given#'
+            identifier: argument.type
+        -
+            identifier: requireOnce.fileNotFound
+        # The PHP version guard exists for hosts older than composer.json allows.
+        -
+            identifier: smaller.alwaysFalse
+            path: meta-writer.php
