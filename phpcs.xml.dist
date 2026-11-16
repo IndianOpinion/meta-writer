@@ -1,0 +1,28 @@
+<?xml version="1.0"?>
+<ruleset name="meta-writer">
+    <description>PSR-12 with WordPress-style long lines allowed.</description>
+    <file>src</file>
+    <file>tests</file>
+    <file>examples</file>
+    <file>meta-writer.php</file>
+    <file>bootstrap.php</file>
+    <file>uninstall.php</file>
+    <exclude-pattern>tests/stubs/*</exclude-pattern>
+    <exclude-pattern>vendor/*</exclude-pattern>
+    <arg name="extensions" value="php"/>
+    <arg name="colors"/>
+    <arg value="sp"/>
+    <rule ref="PSR12">
+        <exclude name="Generic.Files.LineLength"/>
+    </rule>
+    <!-- The plugin entry files declare and run, by WordPress convention. -->
+    <rule ref="PSR1.Files.SideEffects">
+        <exclude-pattern>meta-writer.php</exclude-pattern>
+        <exclude-pattern>bootstrap.php</exclude-pattern>
+        <exclude-pattern>uninstall.php</exclude-pattern>
+        <exclude-pattern>src/functions.php</exclude-pattern>
+        <exclude-pattern>tests/bootstrap.php</exclude-pattern>
+        <exclude-pattern>tests/phpstan-constants.php</exclude-pattern>
+        <exclude-pattern>examples/*</exclude-pattern>
+    </rule>
+</ruleset>
